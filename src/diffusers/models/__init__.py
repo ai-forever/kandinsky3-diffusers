@@ -32,6 +32,7 @@ if is_torch_available():
     from .unet_3d_condition import UNet3DConditionModel
     from .vq_model import VQModel
     from .unet_kandi3 import UNetKandi3
+    from .unet_kandi3 import UNetKandi3IpAdapter
     from .unet_kandi3 import UNetKandi3Controlnet
     from .unet_kandi3 import UNetKandi3Controlnet2
 
