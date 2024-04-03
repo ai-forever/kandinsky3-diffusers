@@ -161,13 +161,14 @@ class Attention(nn.Module):
         self.processor = processor
         
         
-    def forward(self, x, context, context_mask=None, image_mask=None):
+    def forward(self, x, context, context_mask=None, image_mask=None, **kwargs):
         return self.processor(
             self,
             x,
             context=context,
             context_mask=context_mask,
             image_mask=image_mask,
+            **kwargs
         )
 
 class Block(nn.Module):
@@ -261,7 +262,7 @@ class AttentionBlock(nn.Module):
             nn.Conv2d(hidden_channels, num_channels, kernel_size=1, bias=False),
         )
 
-    def forward(self, x, time_embed, context=None, context_mask=None, image_mask=None):
+    def forward(self, x, time_embed, context=None, context_mask=None, image_mask=None, **kwargs):
         height, width = x.shape[-2:]
         out = self.in_norm(x, time_embed)
         out = rearrange(out, 'b c h w -> b (h w) c', h=height, w=width)
@@ -272,7 +273,7 @@ class AttentionBlock(nn.Module):
             image_mask_max = image_mask.amax((-1, -2), keepdim=True)
             image_mask = F.max_pool2d(image_mask, kernel_size, kernel_size)
             image_mask = rearrange(image_mask, 'b h w -> b (h w)', h=height, w=width)
-        out = self.attention(out, context, context_mask, image_mask)
+        out = self.attention(out, context, context_mask, image_mask, **kwargs)
         out = rearrange(out, 'b (h w) c -> b c h w', h=height, w=width)
         x = x + out
 
@@ -320,6 +321,43 @@ class DownSampleBlock(nn.Module):
             x = out_resnet_block(x, time_embed)
         return x
 
+class DownSampleBlockIpAdapter(nn.Module):
+
+    def __init__(
+            self, in_channels, out_channels, time_embed_dim, context_dim=None,
+            num_blocks=3, groups=32, head_dim=64, expansion_ratio=4, compression_ratio=2,
+            down_sample=True, self_attention=True
+    ):
+        super().__init__()
+        self.self_attention_block = set_default_layer(
+            self_attention,
+            AttentionBlock,
+            (in_channels, time_embed_dim, None, groups, head_dim, expansion_ratio),
+            layer_2=Identity
+        )
+
+        up_resolutions = [[None] * 4] * (num_blocks - 1) + [[None, None, set_default_item(down_sample, False), None]]
+        hidden_channels = [(in_channels, out_channels)] + [(out_channels, out_channels)] * (num_blocks - 1)
+        self.resnet_attn_blocks = nn.ModuleList([
+            nn.ModuleList([
+                ResNetBlock(in_channel, out_channel, time_embed_dim, groups, compression_ratio),
+                set_default_layer(
+                    exist(context_dim),
+                    AttentionBlock,
+                    (out_channel, time_embed_dim, context_dim, groups, head_dim, expansion_ratio),
+                    layer_2=Identity
+                ),
+                ResNetBlock(out_channel, out_channel, time_embed_dim, groups, compression_ratio, up_resolution),
+            ]) for (in_channel, out_channel), up_resolution in zip(hidden_channels, up_resolutions)
+        ])
+
+    def forward(self, x, time_embed, context=None, context_mask=None, image_mask=None, image_features=None, img_weight=1):
+        x = self.self_attention_block(x, time_embed, image_mask=image_mask)
+        for in_resnet_block, attention, out_resnet_block in self.resnet_attn_blocks:
+            x = in_resnet_block(x, time_embed)
+            x = attention(x, time_embed, context, context_mask, image_mask, image_features=image_features, img_weight=img_weight)
+            x = out_resnet_block(x, time_embed)
+        return x
 
 class UpSampleBlock(nn.Module):
 
@@ -355,6 +393,44 @@ class UpSampleBlock(nn.Module):
         for in_resnet_block, attention, out_resnet_block in self.resnet_attn_blocks:
             x = in_resnet_block(x, time_embed)
             x = attention(x, time_embed, context, context_mask, image_mask)
+            x = out_resnet_block(x, time_embed)
+        x = self.self_attention_block(x, time_embed, image_mask=image_mask)
+        return x
+        
+class UpSampleBlockIpAdapter(nn.Module):
+
+    def __init__(
+            self, in_channels, cat_dim, out_channels, time_embed_dim, context_dim=None,
+            num_blocks=3, groups=32, head_dim=64, expansion_ratio=4, compression_ratio=2,
+            up_sample=True, self_attention=True, 
+    ):
+        super().__init__()
+        up_resolutions = [[None, set_default_item(up_sample, True), None, None]] + [[None] * 4] * (num_blocks - 1)
+        hidden_channels = [(in_channels + cat_dim, in_channels)] + [(in_channels, in_channels)] * (num_blocks - 2) + [(in_channels, out_channels)]
+        self.resnet_attn_blocks = nn.ModuleList([
+            nn.ModuleList([
+                ResNetBlock(in_channel, in_channel, time_embed_dim, groups, compression_ratio, up_resolution),
+                set_default_layer(
+                    exist(context_dim),
+                    AttentionBlock,
+                    (in_channel, time_embed_dim, context_dim, groups, head_dim, expansion_ratio),
+                    layer_2=Identity
+                ),
+                ResNetBlock(in_channel, out_channel, time_embed_dim, groups, compression_ratio),
+            ]) for (in_channel, out_channel), up_resolution in zip(hidden_channels, up_resolutions)
+        ])
+
+        self.self_attention_block = set_default_layer(
+            self_attention,
+            AttentionBlock,
+            (out_channels, time_embed_dim, None, groups, head_dim, expansion_ratio),
+            layer_2=Identity
+        )
+
+    def forward(self, x, time_embed, context=None, context_mask=None, image_mask=None, image_features=None, img_weight=1):
+        for in_resnet_block, attention, out_resnet_block in self.resnet_attn_blocks:
+            x = in_resnet_block(x, time_embed)
+            x = attention(x, time_embed, context, context_mask, image_mask, image_features=image_features, img_weight=img_weight)
             x = out_resnet_block(x, time_embed)
         x = self.self_attention_block(x, time_embed, image_mask=image_mask)
         return x
@@ -581,7 +657,6 @@ class UNetKandi3(ModelMixin, ConfigMixin):
             if uncondition_mask_idx is not None:
                 context[uncondition_mask_idx] = torch.zeros_like(context[uncondition_mask_idx])
                 context_mask[uncondition_mask_idx] = torch.zeros_like(context_mask[uncondition_mask_idx])
-                print('test1111')
             
         time_embed = self.to_time_embed(self.sin_emb(time).to(x.dtype))
         if timestep_cond is not None:
@@ -607,7 +682,257 @@ class UNetKandi3(ModelMixin, ConfigMixin):
         if not return_dict:
             return (x,)
         return UNetKandi3Out(sample=x)
+
+class UNetKandi3IpAdapter(ModelMixin, ConfigMixin):
+    @register_to_config
+    def __init__(self,
+                 model_channels,
+                 init_channels=None,
+                 num_channels=3,
+                 time_embed_dim=None,
+                 groups=32,
+                 head_dim=64,
+                 expansion_ratio=4,
+                 compression_ratio=2,
+                 dim_mult=(1, 2, 4, 8),
+                 num_blocks=(3, 3, 3, 3),
+                 model_dim=4096,
+                 context_dim=4096,
+                 add_cross_attention=(False, True, True, True),
+                 add_self_attention=(False, True, True, True),
+                 time_cond_proj_dim=None,
+                 num_image_tokens=4,
+                 image_embedding_dim=768
+                 ):
+        super().__init__()
+        out_channels = num_channels
+        init_channels = init_channels or model_channels
+        self.num_image_tokens = num_image_tokens
+        self.context_dim = context_dim
+        self.image_proj = nn.Linear(image_embedding_dim, context_dim * num_image_tokens)
+        self.image_norm = nn.LayerNorm(context_dim)
+        
+        self.projection_lin = nn.Linear(model_dim, context_dim, bias=False)
+        self.projection_ln = nn.LayerNorm(context_dim)
+        self.sin_emb = SinusoidalPosEmb(init_channels)
+        self.unet_time_cond_proj_dim = time_embed_dim
+        
+        if time_cond_proj_dim is not None:
+            self.time_cond = nn.Linear(time_cond_proj_dim, time_embed_dim)
+        self.to_time_embed = nn.Sequential(
+            Identity1(),
+            nn.Linear(init_channels, time_embed_dim),
+            nn.SiLU(),
+            nn.Linear(time_embed_dim, time_embed_dim)
+        )
+        self.feature_pooling = AttentionPolling(time_embed_dim, context_dim, head_dim)
+
+        self.in_layer = nn.Conv2d(num_channels, init_channels, kernel_size=3, padding=1)
+
+        hidden_dims = [init_channels, *map(lambda mult: model_channels * mult, dim_mult)]
+        in_out_dims = list(zip(hidden_dims[:-1], hidden_dims[1:]))
+        text_dims = [set_default_item(is_exist, context_dim) for is_exist in add_cross_attention]
+        layer_params = [num_blocks, text_dims, add_self_attention]
+        rev_layer_params = map(reversed, layer_params)
+
+        cat_dims = []
+        self.num_levels = len(in_out_dims)
+        self.down_samples = nn.ModuleList([])
+        for level, ((in_dim, out_dim), res_block_num, text_dim, self_attention) in enumerate(zip(in_out_dims, *layer_params)):
+            down_sample = level != (self.num_levels - 1)
+            cat_dims.append(set_default_item(level != (self.num_levels - 1), out_dim, 0))
+            self.down_samples.append(
+                DownSampleBlockIpAdapter(
+                    in_dim, out_dim, time_embed_dim, text_dim, res_block_num, groups, head_dim, expansion_ratio,
+                    compression_ratio, down_sample, self_attention
+                )
+            )
+
+        self.up_samples = nn.ModuleList([])
+        for level, ((out_dim, in_dim), res_block_num, text_dim, self_attention) in enumerate(zip(reversed(in_out_dims), *rev_layer_params)):
+            up_sample = level != 0
+            self.up_samples.append(
+                UpSampleBlockIpAdapter(
+                    in_dim, cat_dims.pop(), out_dim, time_embed_dim, text_dim, res_block_num, groups, head_dim,
+                    expansion_ratio, compression_ratio, up_sample, self_attention
+                )
+            )
+
+        self.out_layer = nn.Sequential(
+            nn.GroupNorm(groups, init_channels),
+            nn.SiLU(),
+            nn.Conv2d(init_channels, out_channels, kernel_size=3, padding=1)
+        )
+    @property
+    def attn_processors(self) -> Dict[str, AttentionProcessor]:
+        r"""
+        Returns:
+            `dict` of attention processors: A dictionary containing all attention processors used in the model with
+            indexed by its weight name.
+        """
+        # set recursively
+        processors = {}
+
+        def fn_recursive_add_processors(name: str, module: torch.nn.Module, processors: Dict[str, AttentionProcessor]):
+            if hasattr(module, "set_processor"):
+                processors[f"{name}.processor"] = module.processor
+
+            for sub_name, child in module.named_children():
+                fn_recursive_add_processors(f"{name}.{sub_name}", child, processors)
+
+            return processors
+
+        for name, module in self.named_children():
+            fn_recursive_add_processors(name, module, processors)
+
+        return processors
+
+    def set_attn_processor(self, processor: Union[AttentionProcessor, Dict[str, AttentionProcessor]]):
+        r"""
+        Sets the attention processor to use to compute attention.
+
+        Parameters:
+            processor (`dict` of `AttentionProcessor` or only `AttentionProcessor`):
+                The instantiated processor class or a dictionary of processor classes that will be set as the processor
+                for **all** `Attention` layers.
+
+                If `processor` is a dict, the key needs to define the path to the corresponding cross attention
+                processor. This is strongly recommended when setting trainable attention processors.
+
+        """
+        count = len(self.attn_processors.keys())
+        '''
+        if isinstance(processor, dict) and len(processor) != count:
+            raise ValueError(
+                f"A dict of processors was passed, but the number of processors {len(processor)} does not match the"
+                f" number of attention layers: {count}. Please make sure to pass {count} processor classes."
+            )
+        '''
+        def fn_recursive_attn_processor(name: str, module: torch.nn.Module, processor):
+            if hasattr(module, "set_processor"):
+                if not isinstance(processor, dict):
+                    module.set_processor(processor)
+                else:
+                    module.set_processor(processor.pop(f"{name}.processor"))
+
+            for sub_name, child in module.named_children():
+                fn_recursive_attn_processor(f"{name}.{sub_name}", child, processor)
+
+        for name, module in self.named_children():
+            fn_recursive_attn_processor(name, module, processor)
+
+    def set_default_attn_processor(self):
+        """
+        Disables custom attention processors and sets the default attention implementation.
+        """
+        self.set_attn_processor(Kandi3AttnProcessor())
+
+    def set_attention_slice(self, slice_size):
+        r"""
+        Enable sliced attention computation.
+
+        When this option is enabled, the attention module splits the input tensor in slices to compute attention in
+        several steps. This is useful for saving some memory in exchange for a small decrease in speed.
+
+        Args:
+            slice_size (`str` or `int` or `list(int)`, *optional*, defaults to `"auto"`):
+                When `"auto"`, input to the attention heads is halved, so attention is computed in two steps. If
+                `"max"`, maximum amount of memory is saved by running only one slice at a time. If a number is
+                provided, uses as many slices as `attention_head_dim // slice_size`. In this case, `attention_head_dim`
+                must be a multiple of `slice_size`.
+        """
+        sliceable_head_dims = []
+
+        def fn_recursive_retrieve_sliceable_dims(module: torch.nn.Module):
+            if hasattr(module, "set_attention_slice"):
+                sliceable_head_dims.append(module.sliceable_head_dim)
+
+            for child in module.children():
+                fn_recursive_retrieve_sliceable_dims(child)
+
+        # retrieve number of attention layers
+        for module in self.children():
+            fn_recursive_retrieve_sliceable_dims(module)
+
+        num_sliceable_layers = len(sliceable_head_dims)
+
+        if slice_size == "auto":
+            # half the attention head size is usually a good trade-off between
+            # speed and memory
+            slice_size = [dim // 2 for dim in sliceable_head_dims]
+        elif slice_size == "max":
+            # make smallest slice possible
+            slice_size = num_sliceable_layers * [1]
+
+        slice_size = num_sliceable_layers * [slice_size] if not isinstance(slice_size, list) else slice_size
+
+        if len(slice_size) != len(sliceable_head_dims):
+            raise ValueError(
+                f"You have provided {len(slice_size)}, but {self.config} has {len(sliceable_head_dims)} different"
+                f" attention layers. Make sure to match `len(slice_size)` to be {len(sliceable_head_dims)}."
+            )
+
+        for i in range(len(slice_size)):
+            size = slice_size[i]
+            dim = sliceable_head_dims[i]
+            if size is not None and size > dim:
+                raise ValueError(f"size {size} has to be smaller or equal to {dim}.")
+
+        # Recursively walk through all the children.
+        # Any children which exposes the set_attention_slice method
+        # gets the message
+        def fn_recursive_set_attention_slice(module: torch.nn.Module, slice_size: List[int]):
+            if hasattr(module, "set_attention_slice"):
+                module.set_attention_slice(slice_size.pop())
+
+            for child in module.children():
+                fn_recursive_set_attention_slice(child, slice_size)
+
+        reversed_slice_size = list(reversed(slice_size))
+        for module in self.children():
+            fn_recursive_set_attention_slice(module, reversed_slice_size)
+
+    def _set_gradient_checkpointing(self, module, value=False):
+        if hasattr(module, "gradient_checkpointing"):
+            module.gradient_checkpointing = value
+
     
+    def forward(self, x, time, context=None, context_mask=None, image_mask=None, use_projections=False,
+                return_dict=True, split_context=False, uncondition_mask_idx=None, control_hidden_states=None,
+                timestep_cond=None, image_features=None, img_weight=1):
+        image_features = self.image_proj(image_features).reshape(image_features.shape[0], self.num_image_tokens, self.context_dim)
+        image_features = self.image_norm(image_features)
+        if use_projections:
+            context = self.projection_lin(context)
+            context = self.projection_ln(context)
+            if uncondition_mask_idx is not None:
+                context[uncondition_mask_idx] = torch.zeros_like(context[uncondition_mask_idx])
+                context_mask[uncondition_mask_idx] = torch.zeros_like(context_mask[uncondition_mask_idx])
+            
+        time_embed = self.to_time_embed(self.sin_emb(time).to(x.dtype))
+        if timestep_cond is not None:
+            time_embed += self.time_cond(timestep_cond)
+        if exist(context):
+            time_embed = self.feature_pooling(time_embed, context, context_mask)
+
+        hidden_states = []
+        x = self.in_layer(x)
+        for level, down_sample in enumerate(self.down_samples):
+            x = down_sample(x, time_embed, context, context_mask, image_mask, image_features=image_features, img_weight=img_weight)
+            if level != self.num_levels - 1:
+                hidden_states.append(x)
+        
+        for level, up_sample in enumerate(self.up_samples):
+            if level != 0:
+                if control_hidden_states is not None:
+                    x = torch.cat([x, hidden_states.pop() + control_hidden_states.pop()], dim=1)
+                else:
+                    x = torch.cat([x, hidden_states.pop()], dim=1)
+            x = up_sample(x, time_embed, context, context_mask, image_mask, image_features=image_features, img_weight=img_weight)
+        x = self.out_layer(x)
+        if not return_dict:
+            return (x,)
+        return UNetKandi3Out(sample=x)
     
 def zero_module(module):
     """
@@ -854,7 +1179,6 @@ class UNetKandi3Controlnet(ModelMixin, ConfigMixin):
             if uncondition_mask_idx is not None:
                 context[uncondition_mask_idx] = torch.zeros_like(context[uncondition_mask_idx])
                 context_mask[uncondition_mask_idx] = torch.zeros_like(context_mask[uncondition_mask_idx])
-                print('test1111')
                 
         time_embed = self.to_time_embed(self.sin_emb(time).to(x.dtype))
         if exist(context):
@@ -940,10 +1264,6 @@ class UNetKandi3Controlnet2(ModelMixin, ConfigMixin):
             nn.SiLU(),
             nn.Conv2d(init_channels, out_channels, kernel_size=3, padding=1)
         )
-        
-        
-
-    
 
     def forward(self, x, time, context=None, context_mask=None, image_mask=None, use_projections=False,
                 return_dict=True, split_context=False, uncondition_mask_idx=None, control_hidden_states=None, hint=None):
@@ -953,7 +1273,6 @@ class UNetKandi3Controlnet2(ModelMixin, ConfigMixin):
             if uncondition_mask_idx is not None:
                 context[uncondition_mask_idx] = torch.zeros_like(context[uncondition_mask_idx])
                 context_mask[uncondition_mask_idx] = torch.zeros_like(context_mask[uncondition_mask_idx])
-                print('test1111')
             
         time_embed = self.to_time_embed(self.sin_emb(time).to(x.dtype))
         if exist(context):
