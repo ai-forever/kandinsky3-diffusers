@@ -40,6 +40,7 @@ else:
         UNetKandi3,
         UNetKandi3Controlnet,
         UNetKandi3Controlnet2,
+        UNetKandi3IpAdapter,
         AutoencoderKL,
         AutoencoderTiny,
         ControlNetModel,
