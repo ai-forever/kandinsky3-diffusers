@@ -467,7 +467,7 @@ class KandinskyV3PipelineIpAdapter(DiffusionPipeline, LoraLoaderMixin):
                         image_embeddins = self.prepare_image_emb(img[i]) * weights[i]
                     else:
                         image_embeddins = image_embeddins + self.prepare_image_emb(img[i]) * weights[i]
-            image_features = torch.cat([self.get_zero_embed(), image_embeddins], dim=0)
+            image_features = torch.cat([self.get_zero_embed().repeat(num_images_per_prompt, 1, 1, 1), image_embeddins.repeat(num_images_per_prompt, 1, 1, 1)], dim=0)
         # 4. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
