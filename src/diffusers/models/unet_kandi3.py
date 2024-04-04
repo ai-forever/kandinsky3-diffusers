@@ -16,6 +16,7 @@ from einops import rearrange
 from ..utils import BaseOutput, logging
 from .modeling_utils import ModelMixin
 from ..configuration_utils import ConfigMixin, register_to_config
+from .attention_processor import Kandi3AttnProcessorIpAdapter, Kandi3AttnProcessor
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -763,6 +764,38 @@ class UNetKandi3IpAdapter(ModelMixin, ConfigMixin):
             nn.SiLU(),
             nn.Conv2d(init_channels, out_channels, kernel_size=3, padding=1)
         )
+        self.set_ip_processors()
+        
+    def set_ip_processors(self):
+        print(1111111)
+        ip_attn_procs = {}
+        ip_attn_procs['feature_pooling.attention.processor'] = Kandi3AttnProcessor()
+        ip_attn_procs['down_samples.1.self_attention_block.attention.processor'] = Kandi3AttnProcessor()
+        ip_attn_procs['down_samples.1.resnet_attn_blocks.0.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=768, out_channels=768, image_dim=4096)
+        ip_attn_procs['down_samples.1.resnet_attn_blocks.1.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=768, out_channels=768, image_dim=4096)
+        ip_attn_procs['down_samples.1.resnet_attn_blocks.2.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=768, out_channels=768, image_dim=4096)
+        ip_attn_procs['down_samples.2.self_attention_block.attention.processor'] = Kandi3AttnProcessor()
+        ip_attn_procs['down_samples.2.resnet_attn_blocks.0.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=1536, out_channels=1536, image_dim=4096)
+        ip_attn_procs['down_samples.2.resnet_attn_blocks.1.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=1536, out_channels=1536, image_dim=4096)
+        ip_attn_procs['down_samples.2.resnet_attn_blocks.2.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=1536, out_channels=1536, image_dim=4096)
+        ip_attn_procs['down_samples.3.self_attention_block.attention.processor'] = Kandi3AttnProcessor()
+        ip_attn_procs['down_samples.3.resnet_attn_blocks.0.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=3072, out_channels=3072, image_dim=4096)
+        ip_attn_procs['down_samples.3.resnet_attn_blocks.1.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=3072, out_channels=3072, image_dim=4096)
+        ip_attn_procs['down_samples.3.resnet_attn_blocks.2.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=3072, out_channels=3072, image_dim=4096)
+        ip_attn_procs['up_samples.0.resnet_attn_blocks.0.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=3072, out_channels=3072, image_dim=4096)
+        ip_attn_procs['up_samples.0.resnet_attn_blocks.1.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=3072, out_channels=3072, image_dim=4096)
+        ip_attn_procs['up_samples.0.resnet_attn_blocks.2.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=3072, out_channels=3072, image_dim=4096)
+        ip_attn_procs['up_samples.0.self_attention_block.attention.processor'] = Kandi3AttnProcessor()
+        ip_attn_procs['up_samples.1.resnet_attn_blocks.0.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=3072, out_channels=3072, image_dim=4096)
+        ip_attn_procs['up_samples.1.resnet_attn_blocks.1.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=1536, out_channels=1536, image_dim=4096)
+        ip_attn_procs['up_samples.1.resnet_attn_blocks.2.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=1536, out_channels=1536, image_dim=4096)
+        ip_attn_procs['up_samples.1.self_attention_block.attention.processor'] = Kandi3AttnProcessor()
+        ip_attn_procs['up_samples.2.resnet_attn_blocks.0.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=1536, out_channels=1536, image_dim=4096)
+        ip_attn_procs['up_samples.2.resnet_attn_blocks.1.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=768, out_channels=768, image_dim=4096)
+        ip_attn_procs['up_samples.2.resnet_attn_blocks.2.1.attention.processor'] = Kandi3AttnProcessorIpAdapter(in_channels=768, out_channels=768, image_dim=4096)
+        ip_attn_procs['up_samples.2.self_attention_block.attention.processor'] = Kandi3AttnProcessor()
+        self.set_attn_processor(ip_attn_procs)
+
     @property
     def attn_processors(self) -> Dict[str, AttentionProcessor]:
         r"""
