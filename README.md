@@ -216,7 +216,7 @@ We also want to thank @heejkoo for the very helpful overview of papers, code and
 
 ## Citation
 
-```
+```bibtex
 @inproceedings{vladimir-etal-2024-kandinsky,
     title = "Kandinsky 3: Text-to-Image Synthesis for Multifunctional Generative Framework",
     author = "Vladimir, Arkhipkin  and
