@@ -91,6 +91,7 @@ else:
         KandinskyV3ControlnetPipeline,
         KandinskyV3ControlnetRegionalPromptingPipeline,
         KandinskyV3Img2ImgPipeline,
+        KandinskyV3Img2ImgRegionalPromptingPipeline,
     )
     from .latent_diffusion import LDMTextToImagePipeline
     from .paint_by_example import PaintByExamplePipeline

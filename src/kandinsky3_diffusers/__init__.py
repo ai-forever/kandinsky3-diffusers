@@ -171,6 +171,7 @@ else:
         KandinskyV3ControlnetPipeline,
         KandinskyV3ControlnetRegionalPromptingPipeline,
         KandinskyV3Img2ImgPipeline,
+        KandinskyV3Img2ImgRegionalPromptingPipeline,
         LDMTextToImagePipeline,
         PaintByExamplePipeline,
         SemanticStableDiffusionPipeline,
