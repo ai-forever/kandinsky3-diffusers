@@ -157,7 +157,7 @@ class DepsTableUpdateCommand(Command):
     description = "build runtime dependency table"
     user_options = [
         # format: (long option, short option, description).
-        ("dep-table-update", None, "updates src/diffusers/dependency_versions_table.py"),
+        ("dep-table-update", None, "updates src/kandinsky3-diffusers/dependency_versions_table.py"),
     ]
 
     def initialize_options(self):
@@ -177,7 +177,7 @@ class DepsTableUpdateCommand(Command):
             "}",
             "",
         ]
-        target = "src/diffusers/dependency_versions_table.py"
+        target = "src/kandinsky3-diffusers/dependency_versions_table.py"
         print(f"updating {target}")
         with open(target, "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(content))
@@ -232,23 +232,23 @@ install_requires = [
 ]
 
 setup(
-    name="diffusers",
+    name="kandinsky3_diffusers",
     version="0.20.0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
-    description="Diffusers",
+    description="Kandinsky 3 Diffusers",
     long_description=open("README.md", "r", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     keywords="deep learning",
     license="Apache",
     author="The HuggingFace team",
     author_email="patrick@huggingface.co",
-    url="https://github.com/huggingface/diffusers",
+    url="https://github.com/ai-forever/kandinsky3-diffusers",
     package_dir={"": "src"},
     packages=find_packages("src"),
     include_package_data=True,
     python_requires=">=3.7.0",
     install_requires=list(install_requires),
     extras_require=extras,
-    entry_points={"console_scripts": ["diffusers-cli=diffusers.commands.diffusers_cli:main"]},
+    entry_points={"console_scripts": ["kandinsky3_diffusers-cli=kandinsky3_diffusers.commands.kandinsky3_diffusers_cli:main"]},
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",

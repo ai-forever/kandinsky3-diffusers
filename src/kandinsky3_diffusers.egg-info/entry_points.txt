@@ -1,0 +1,2 @@
+[console_scripts]
+kandinsky3_diffusers-cli = kandinsky3_diffusers.commands.kandinsky3_diffusers_cli:main
