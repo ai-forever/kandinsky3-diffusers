@@ -434,7 +434,7 @@ class KandinskyV3ControlnetPipeline(DiffusionPipeline, LoraLoaderMixin):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: int = 1,
         latents=None,
-        cut_context: bool = False,
+        cut_context: bool = True,
         hint=None,
         k = 1,
         ### ADDED PARAMETERS
