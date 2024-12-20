@@ -187,8 +187,9 @@ class KandinskyV3Img2ImgPipeline(DiffusionPipeline, LoraLoaderMixin):
         # duplicate text embeddings for each generation per prompt, using mps friendly method
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
         prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
-        attention_mask = attention_mask.repeat(num_images_per_prompt, 1)
+
         split_context = False
+        
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance and negative_prompt_embeds is None:
             uncond_tokens: List[str]
@@ -196,6 +197,11 @@ class KandinskyV3Img2ImgPipeline(DiffusionPipeline, LoraLoaderMixin):
             if negative_prompt is None:
                 split_context = True
                 uncond_tokens = [""] * batch_size
+            elif prompt is not None and type(prompt) is not type(negative_prompt):
+                raise TypeError(
+                    f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
+                    f" {type(prompt)}."
+                )
             elif isinstance(negative_prompt, str):
                 uncond_tokens = [negative_prompt]
             elif batch_size != len(negative_prompt):
@@ -206,47 +212,38 @@ class KandinskyV3Img2ImgPipeline(DiffusionPipeline, LoraLoaderMixin):
                 )
             else:
                 uncond_tokens = negative_prompt
-            if negative_prompt is not None:
-                uncond_input = self.tokenizer(
-                    uncond_tokens,
-                    padding="max_length",
-                    max_length=128,
-                    truncation=True,
-                    return_attention_mask=True,
-                    return_tensors="pt",
-                )
-                text_input_ids = uncond_input.input_ids.to(device)
-                negative_attention_mask = uncond_input.attention_mask.to(device)
-
-                negative_prompt_embeds = self.text_encoder(
-                    text_input_ids,
-                    attention_mask=negative_attention_mask,
-                )
-                negative_prompt_embeds = negative_prompt_embeds[0]
-                negative_prompt_embeds = negative_prompt_embeds[:, :prompt_embeds.shape[1]]
-                negative_attention_mask = negative_attention_mask[:, :prompt_embeds.shape[1]]
-                negative_prompt_embeds = self.project_emb(negative_prompt_embeds)
-                negative_prompt_embeds = negative_prompt_embeds * negative_attention_mask.unsqueeze(2)
                 
-            else:
-                negative_prompt_embeds = torch.zeros_like(prompt_embeds)
-                negative_attention_mask = torch.zeros_like(attention_mask)
+            max_length = prompt_embeds.shape[1]
+            uncond_input = self.tokenizer(
+                uncond_tokens,
+                padding="max_length",
+                max_length=max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+            text_input_ids = uncond_input.input_ids.to(device)
+            negative_attention_mask = uncond_input.attention_mask.to(device)
+
+            negative_prompt_embeds = self.text_encoder(
+                text_input_ids,
+                attention_mask=negative_attention_mask,
+            )
+            negative_prompt_embeds = negative_prompt_embeds[0]
+            negative_prompt_embeds = self.project_emb(negative_prompt_embeds)
+            negative_prompt_embeds = negative_prompt_embeds * negative_attention_mask.unsqueeze(2)
 
         if do_classifier_free_guidance:
             # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
             seq_len = negative_prompt_embeds.shape[1]
 
             negative_prompt_embeds = negative_prompt_embeds.to(dtype=dtype, device=device)
-            if negative_prompt_embeds.shape != prompt_embeds.shape:
-                negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
-                negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
-                negative_attention_mask = negative_attention_mask.repeat(num_images_per_prompt, 1)
 
-            # For classifier free guidance, we need to do two forward passes.
-            # Here we concatenate the unconditional and text embeddings into a single batch
-            # to avoid doing two forward passes
-        else:
-            negative_prompt_embeds = None
+            negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
+            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+            
+        attention_mask = attention_mask.repeat(num_images_per_prompt, 1)
+        negative_attention_mask = negative_attention_mask.repeat(num_images_per_prompt, 1)
+        
         return prompt_embeds, negative_prompt_embeds, attention_mask, negative_attention_mask, split_context
     
     @torch.no_grad()
