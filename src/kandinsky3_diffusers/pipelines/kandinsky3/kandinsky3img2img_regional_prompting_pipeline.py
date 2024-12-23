@@ -31,9 +31,6 @@ def exist(item):
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
-KEYWORD_COMMON_PROMPT = "ADDCOMM"
-KEYWORD_BREAK = "BREAK"
-
 
 class KandinskyV3Img2ImgRegionalPromptingPipeline(KandinskyV3Img2ImgPipeline):
 
@@ -85,22 +82,29 @@ class KandinskyV3Img2ImgRegionalPromptingPipeline(KandinskyV3Img2ImgPipeline):
         latents=None,
         cut_context=False,
         ### Regional Prompting
-        rp_kwargs: Dict[str, str] = None,
+        regional_prompts: List[str] = None,
+        regional_negative_prompts: List[str] = None,
+        regional_masks: List[torch.Tensor] = None,
+        base_ratio: float = 0.0,
     ):  
 
-        active = KEYWORD_BREAK in prompt[0] if isinstance(prompt, list) else KEYWORD_BREAK in prompt
-        if negative_prompt is None:
-            negative_prompt = "" if isinstance(prompt, str) else [""] * len(prompt)
-            
         device = self._execution_device
-        regions = 0
-            
-        prompts = prompt if isinstance(prompt, list) else [prompt]
-        negative_prompts = negative_prompt if isinstance(prompt, list) else [negative_prompt] # HERE I CHANGED `str` TO `list`
-        self.batch = batch = num_images_per_prompt * len(prompts) # = 1 almost always
-        prompts_concatenated = create_prompts_for_regions(prompts, num_images_per_prompt)
-        negative_prompts_concatenated = create_prompts_for_regions(negative_prompts, num_images_per_prompt)
-        equal = len(prompts_concatenated) == len(negative_prompts_concatenated)
+        regions = len(regional_masks)
+        orig_hw = (height, width)
+        
+        (
+            prompt_embeds, 
+            negative_prompt_embeds, 
+            attention_mask, 
+            negative_attention_mask, 
+            split_context
+        ) = self.encode_prompt(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            device=device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=True,
+        )
         
         (
             regional_prompt_embeds, 
@@ -109,7 +113,7 @@ class KandinskyV3Img2ImgRegionalPromptingPipeline(KandinskyV3Img2ImgPipeline):
             _, 
             _
         ) = self.encode_prompt(
-            prompt=prompts_concatenated,
+            prompt=regional_prompts,
             device=device,
             num_images_per_prompt=1,
             do_classifier_free_guidance=True,
@@ -122,113 +126,89 @@ class KandinskyV3Img2ImgRegionalPromptingPipeline(KandinskyV3Img2ImgPipeline):
             _, 
             _
         ) = self.encode_prompt(
-            prompt=negative_prompts_concatenated,
+            prompt=regional_negative_prompts,
             device=device,
             num_images_per_prompt=1,
             do_classifier_free_guidance=True,
         )
         
-        prompt_embeds = negative_prompt_embeds = None
-        
-        if active:
+        def hook_forward(module):
+            
+            def forward(
+                x: torch.Tensor,
+                context: Optional[torch.Tensor] = None,
+                context_mask: Optional[torch.Tensor] = None,
+                image_mask: Optional[torch.Tensor] = None,
+            ) -> torch.Tensor:
                 
-            regional_masks = rp_kwargs["regional_masks"]
-            regions = len(regional_masks)
-
-            orig_hw = (height, width)
-            revers = True
-
-            def hook_forward(module):
+                attn = module
+                xshape = x.shape # (2, h * w, emb_dim), e.g. h = w = 64, emb_dim = 768
+                (h, w) = calculate_dimensions(xshape[1], *orig_hw)
                 
-                def forward(
-                    x: torch.Tensor,
-                    context: Optional[torch.Tensor] = None,
-                    context_mask: Optional[torch.Tensor] = None,
-                    image_mask: Optional[torch.Tensor] = None,
-                ) -> torch.Tensor:
+                # expand x to match number of regions
+                x_uncond, x_text = x.chunk(2)
+                x = torch.cat(
+                    [x_uncond, x_text] + regions * [x_uncond] + regions * [x_text], 
+                    dim=0
+                )
+
+                # expand context to match x shape
+                context = torch.cat(
+                    [negative_prompt_embeds, prompt_embeds, regional_negative_prompt_embeds, regional_prompt_embeds],
+                    dim=0
+                )
+                context_mask = torch.cat(
+                    [negative_attention_mask, attention_mask, regional_negative_prompt_embeds_mask, regional_prompt_embeds_mask],
+                    dim=0
+                )
+
+                query = rearrange(attn.to_query(x), 'b n (h d) -> b h n d', h=attn.num_heads)
+                key = rearrange(attn.to_key(context), 'b n (h d) -> b h n d', h=attn.num_heads)
+                value = rearrange(attn.to_value(context), 'b n (h d) -> b h n d', h=attn.num_heads)
+                attention_matrix = einsum('b h i d, b h j d -> b h i j', query, key)
                     
-                    attn = module
-                    xshape = x.shape # (2, h * w, emb_dim), e.g. h = w = 64, emb_dim = 768
-                    self.hw = (h, w) = calculate_dimensions(xshape[1], *orig_hw)
+                if exist(context_mask):
+                    max_neg_value = -torch.finfo(attention_matrix.dtype).max
+                    context_mask = rearrange(context_mask, 'b j -> b 1 1 j')
+                    attention_matrix = attention_matrix.masked_fill(~(context_mask != 0), max_neg_value)
+                attention_matrix = (attention_matrix * attn.scale).softmax(dim=-1)
 
-                    if revers:
-                        x_uncond, x_text = x.chunk(2)
-                    else:
-                        x_text, x_uncond = x.chunk(2)
-                        
-                    # print('regions:', regions)
-
-                    if equal:
-                        x = torch.cat(
-                            [x_text for i in range(regions)] + [x_uncond for i in range(regions)],
-                            0,
-                        )
-                    else:
-                        x = torch.cat([x_text for i in range(regions)] + [x_uncond], 0)
-                        
-                    # x: (1 + regions, h * w, emb_dim), regions = 3, h = w = 64, emb_dim = 768
-                    # regional_prompt_embeds: (regions, seq_len, context_dim), e.g. regions = 3, seq_len = 128, context_dim = 4096
-                    # regional_negative_prompt_embeds: (1, seq_len, context_dim), e.g. regions = 3, seq_len = 128, context_dim = 4096
-                    context = torch.cat([regional_prompt_embeds] + [regional_negative_prompt_embeds], 0)
-                    context_mask = torch.cat([regional_prompt_embeds_mask] + [regional_negative_prompt_embeds_mask], 0)
-
-                    query = rearrange(attn.to_query(x), 'b n (h d) -> b h n d', h=attn.num_heads)
-                    key = rearrange(attn.to_key(context), 'b n (h d) -> b h n d', h=attn.num_heads)
-                    value = rearrange(attn.to_value(context), 'b n (h d) -> b h n d', h=attn.num_heads)
-                    attention_matrix = einsum('b h i d, b h j d -> b h i j', query, key) # (1 + regions, num_heads, h * w, seq_len), e.g. regions = 3, num_heads = 24, h = w = 64, seq_len = 128
-
-                    if exist(image_mask) and exist(context_mask):
-                        image_mask = rearrange(image_mask, 'b i -> b 1 i 1')
-                        image_text_mask_1 = rearrange((context_mask == 1).type(image_mask.dtype), 'b j -> b 1 1 j')
-                        image_text_mask_2 = rearrange((context_mask == 2).type(image_mask.dtype), 'b j -> b 1 1 j')
-                        
-                        image_mask_max = image_mask.amax(-2, keepdim=True)
-                        max_attention = rearrange(attention_matrix.amax((-2, -1)), 'b h -> b h 1 1')
-                        attention_matrix = attention_matrix + max_attention * (image_mask * image_text_mask_1)
-                        attention_matrix = attention_matrix + max_attention * ((image_mask_max - image_mask) * image_text_mask_2)
-                        
-                    if exist(context_mask):
-                        max_neg_value = -torch.finfo(attention_matrix.dtype).max
-                        context_mask = rearrange(context_mask, 'b j -> b 1 1 j')
-                        attention_matrix = attention_matrix.masked_fill(~(context_mask != 0), max_neg_value)
-                    attention_matrix = (attention_matrix * attn.scale).softmax(dim=-1)
-
-                    x = einsum('b h i j, b h j d -> b h i d', attention_matrix, value)
-                    x = rearrange(x, 'b h n d -> b n (h d)')
-                    x = attn.output_layer(x)
+                x = einsum('b h i j, b h j d -> b h i d', attention_matrix, value)
+                x = rearrange(x, 'b h n d -> b n (h d)')
+                x = attn.output_layer(x)
+                
+                # Regional masked attention
+                reshaped = x.reshape(x.size()[0], h, w, x.size()[2])
+                x_base = reshaped[:2]
+                x_uncond, x_text = reshaped[2:].chunk(2)
+                for out in (x_uncond, x_text):
+                    for region_idx, regional_mask in enumerate(regional_masks):
+                        regional_mask = torch.nn.functional.interpolate(regional_mask[None, None, :, :], (h, w), mode='nearest-exact')
+                        regional_mask = regional_mask.permute(0, 2, 3, 1).to(x.device)
+                        # Replace masked area of the latent with the corresponding regional latent
+                        out[0] = regional_mask * out[region_idx:region_idx+1] + (1 - regional_mask) * out[0]
+                x = torch.stack([x_uncond[0], x_text[0]], dim=0)
+                
+                # apply base ratio
+                x = (1 - base_ratio) * x + base_ratio * x_base
+                x = x.reshape(xshape)
                     
-                    # Regional masked attention
-                    reshaped = x.reshape(x.size()[0], h, w, x.size()[2]) # (1 + regions, h, w, emb_dim), e.g. regions = 3, h = w = 64, emb_dim = 768
-                    center = reshaped.shape[0] // 2 # e.g. for regions = 3 -> center = 2
-                    x_text = reshaped[0:center] if equal else reshaped[0:-batch] # e.g. first regions (if not equal)
-                    x_uncond = reshaped[center:] if equal else reshaped[-batch:] # e.g. the last one (if not equal)
-                    outs = [x_text, x_uncond] if equal else [x_text] # e.g. [(regions, h, w, emb_dim)]
-                    for out in outs:
-                        for region_idx, regional_mask in enumerate(regional_masks):
-                            regional_mask = torch.nn.functional.interpolate(regional_mask[None, None, :, :], (h, w), mode='nearest-exact')
-                            regional_mask = regional_mask.permute(0, 2, 3, 1).to(x.device)
-                            # Replace masked area of the latent with the corresponding regional latent
-                            out[0:batch] = regional_mask * out[region_idx * batch : (region_idx + 1) * batch] + (1 - regional_mask) * out[0:batch]
-                    x_text, x_uncond = (x_text[0:batch], x_uncond[0:batch]) if equal else (x_text[0:batch], x_uncond)
-                    x = torch.cat([x_uncond, x_text], 0) if revers else torch.cat([x_text, x_uncond], 0)
-                    x = x.reshape(xshape)
-                        
-                    return x
+                return x
 
-                return forward
+            return forward
 
-            def hook_forwards(root_module: torch.nn.Module):
-                for name, module in root_module.named_modules():
-                    if "attn" in name and module.__class__.__name__ == "Attention":
-                        module.forward = hook_forward(module)
+        def hook_forwards(root_module: torch.nn.Module):
+            for name, module in root_module.named_modules():
+                if "attn" in name and module.__class__.__name__ == "Attention":
+                    module.forward = hook_forward(module)
 
-            hook_forwards(self.unet)
+        hook_forwards(self.unet)
             
         output = KandinskyV3Img2ImgPipeline(**self.components)(
             prompt=prompt,
-            prompt_embeds=prompt_embeds,
+            prompt_embeds=None,
             negative_prompt=negative_prompt,
-            negative_prompt_embeds=negative_prompt_embeds,
+            negative_prompt_embeds=None,
             image=image,
             strength=strength,
             height=height,
@@ -245,33 +225,6 @@ class KandinskyV3Img2ImgRegionalPromptingPipeline(KandinskyV3Img2ImgPipeline):
         )
 
         return output
-        
-        
-def create_prompts_for_regions(prompts, batch_size):
-    """
-    Creates a list of prompts for each region, considering common prompts and batch size.
-
-    Args:
-        prompts: A list of prompts, potentially containing common prompts and region-specific prompts.
-        batch_size: The desired batch size for the prompts.
-
-    Returns:
-        A concatenated list of prompts ready for batch processing.
-    """
-
-    processed_prompts = []
-    for prompt in prompts:
-        prompt = prompt.strip()
-        common_prompt, region_prompts = prompt.split(KEYWORD_COMMON_PROMPT) if KEYWORD_COMMON_PROMPT in prompt else ("", prompt)
-        region_prompts = [f"{common_prompt.strip()} {p.strip()}" for p in region_prompts.split(KEYWORD_BREAK)]
-        processed_prompts.append(region_prompts)
-
-    concatenated_prompts = []
-    for region_prompts in processed_prompts:
-        for prompt in region_prompts:
-            concatenated_prompts.extend([prompt] * batch_size)
-
-    return concatenated_prompts
 
 
 def calculate_dimensions(total_pixels, height, width):
